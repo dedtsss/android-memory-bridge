@@ -1,0 +1,6 @@
+{
+  "gateway_url": "https://memory-gateway.example",
+  "api_token": "paste-at-runtime-only",
+  "max_context_tokens": 1200,
+  "confirm_before_save": true
+}
