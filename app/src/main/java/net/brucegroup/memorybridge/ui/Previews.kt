@@ -34,7 +34,7 @@ private fun RecallResultPreview() {
         BridgePage(androidx.compose.ui.res.stringResource(R.string.recall_from_memory)) {
             TextCard("Короткий context-pack из внешней памяти.")
             Button(onClick = {}, modifier = Modifier.fillMaxWidth()) {
-                Text(androidx.compose.ui.res.stringResource(R.string.copy_and_open_chatgpt))
+                Text(androidx.compose.ui.res.stringResource(R.string.copy_and_return))
             }
         }
     }

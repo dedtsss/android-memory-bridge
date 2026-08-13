@@ -23,7 +23,7 @@
     <string name="saved_to_memory">Saved to memory</string>
     <string name="undo">Undo</string>
     <string name="copy">Copy</string>
-    <string name="copy_and_open_chatgpt">Copy and open ChatGPT</string>
+    <string name="copy_and_return">Copy and return</string>
     <string name="shared_text">Shared text</string>
     <string name="share_url_notice">Only a URL was received. The conversation text was not downloaded.</string>
     <string name="recall_optional">Recall instead</string>

@@ -23,7 +23,7 @@
     <string name="saved_to_memory">Сохранено в память</string>
     <string name="undo">Отменить</string>
     <string name="copy">Копировать</string>
-    <string name="copy_and_open_chatgpt">Копировать и открыть ChatGPT</string>
+    <string name="copy_and_return">Скопировать и вернуться</string>
     <string name="shared_text">Полученный текст</string>
     <string name="share_url_notice">Получен только URL. Полный текст диалога не загружался.</string>
     <string name="recall_optional">Вспомнить вместо этого</string>

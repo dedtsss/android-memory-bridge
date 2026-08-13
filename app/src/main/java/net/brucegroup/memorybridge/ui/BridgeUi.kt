@@ -3,8 +3,6 @@ package net.brucegroup.memorybridge.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -68,14 +66,9 @@ fun copyToClipboard(context: Context, value: String) {
     clipboard.setPrimaryClip(ClipData.newPlainText("Memory Bridge context", value))
 }
 
-fun openChatGpt(context: Context) {
-    val chatGpt = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setPackage("com.openai.chatgpt")
-    val fallback = Intent(Intent.ACTION_VIEW, Uri.parse("https://chatgpt.com"))
-    try {
-        context.startActivity(chatGpt)
-    } catch (_: Exception) {
-        context.startActivity(fallback)
-    }
+fun copyAndFinish(context: Context, value: String, finish: () -> Unit) {
+    copyToClipboard(context, value)
+    finish()
 }
 
 fun gatewayMessage(context: Context, error: Throwable): String {

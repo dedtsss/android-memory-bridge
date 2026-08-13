@@ -28,8 +28,8 @@ import net.brucegroup.memorybridge.ui.BusyIndicator
 import net.brucegroup.memorybridge.ui.MemoryBridgeTheme
 import net.brucegroup.memorybridge.ui.TextCard
 import net.brucegroup.memorybridge.ui.copyToClipboard
+import net.brucegroup.memorybridge.ui.copyAndFinish
 import net.brucegroup.memorybridge.ui.gatewayMessage
-import net.brucegroup.memorybridge.ui.openChatGpt
 import net.brucegroup.memorybridge.util.IncomingText
 import net.brucegroup.memorybridge.util.SharedTextInput
 
@@ -172,10 +172,9 @@ private fun ShareRecallResult(contextPack: String, onClose: () -> Unit) {
         Text(androidx.compose.ui.res.stringResource(R.string.copy))
     }
     Button(onClick = {
-        copyToClipboard(context, contextPack)
-        openChatGpt(context)
+        copyAndFinish(context, contextPack, onClose)
     }, modifier = Modifier.fillMaxWidth()) {
-        Text(androidx.compose.ui.res.stringResource(R.string.copy_and_open_chatgpt))
+        Text(androidx.compose.ui.res.stringResource(R.string.copy_and_return))
     }
     OutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
         Text(androidx.compose.ui.res.stringResource(R.string.close))
