@@ -23,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import net.brucegroup.memorybridge.BuildConfig
 import net.brucegroup.memorybridge.R
 import net.brucegroup.memorybridge.domain.GatewayException
 
@@ -73,7 +74,13 @@ fun copyAndFinish(context: Context, value: String, finish: () -> Unit) {
 
 fun gatewayMessage(context: Context, error: Throwable): String {
     val message = when (error) {
-        is GatewayException.Configuration -> context.getString(R.string.error_configuration)
+        is GatewayException.Configuration -> when {
+            BuildConfig.DEBUG && error.message == "Invalid Gateway URL" ->
+                context.getString(R.string.error_invalid_gateway_url)
+            BuildConfig.DEBUG && error.message == "Missing API token" ->
+                context.getString(R.string.error_missing_api_token)
+            else -> context.getString(R.string.error_configuration)
+        }
         is GatewayException.Offline -> context.getString(R.string.error_offline)
         is GatewayException.Timeout -> context.getString(R.string.error_timeout)
         is GatewayException.ResponseTooLarge -> context.getString(R.string.error_response_too_large)
