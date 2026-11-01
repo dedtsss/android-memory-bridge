@@ -15,7 +15,7 @@ cleanup() {
   docker rm -f tencent-memorycore >/dev/null 2>&1
   docker rm -f synthetic-ollama >/dev/null 2>&1
   docker network rm "$network" >/dev/null 2>&1
-  docker volume rm synthetic-hf-cache synthetic-ollama tencent-synthetic-data >/dev/null 2>&1
+  docker volume rm synthetic-ollama tencent-synthetic-data >/dev/null 2>&1
 }
 trap cleanup EXIT
 
@@ -34,12 +34,23 @@ git clone -q --depth 1 --branch v2.0.34 https://github.com/MemTensor/MemOS.git "
 git clone -q --depth 1 --branch v2.0.3 https://github.com/Tencent/TencentDB-Agent-Memory.git "$work/tencent"
 test "$(git -C "$work/memos" rev-parse HEAD)" = 41bf5c7fa89ee08ebedf3c662638b06fc29aca8d
 test "$(git -C "$work/tencent" rev-parse HEAD)" = 084bed45cad6bb7f877455082cee82835d65671a
+python3 - "$work/memos/src/memos/mem_os/utils/default_config.py" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+old = '"tokenizer_or_token_counter": "gpt2"'
+if text.count(old) != 1:
+    raise SystemExit("Pinned MemOS default tokenizer config changed unexpectedly")
+path.write_text(text.replace(old, '"tokenizer_or_token_counter": "character"'))
+PY
 cat > "$artifacts/sources.json" <<'JSON'
 {
   "memos": {"repository": "https://github.com/MemTensor/MemOS", "tag": "v2.0.34", "commit": "41bf5c7fa89ee08ebedf3c662638b06fc29aca8d", "stack": "official self-host REST API + Neo4j + Qdrant"},
   "tencentdb_agent_memory": {"repository": "https://github.com/Tencent/TencentDB-Agent-Memory", "tag": "v2.0.3", "commit": "084bed45cad6bb7f877455082cee82835d65671a", "stack": "official MemoryCore standalone + SQLite + FTS5/BM25"},
   "inference": {"runtime": "local Ollama", "chat_model": "qwen3:0.6b", "embedding_model": "nomic-embed-text", "external_provider": false},
-  "tokenizer": {"repository": "https://huggingface.co/openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "runtime_cache_only": true}
+  "memos_chunker_config_override": {"upstream_default": "gpt2", "selected": "character", "reason": "official Chonkie built-in tokenizer avoids network downloads; overridden only in ephemeral upstream checkout"}
 }
 JSON
 
@@ -120,9 +131,6 @@ PY
 cat > "$work/memos/experiment-compose.yml" <<'YAML'
 services:
   memos:
-    environment:
-      HF_HUB_OFFLINE: "1"
-      TRANSFORMERS_OFFLINE: "1"
     deploy:
       resources:
         limits:
@@ -130,8 +138,6 @@ services:
           memory: 4G
     networks:
       - memos_network
-    volumes:
-      - synthetic-hf-cache:/root/.cache/huggingface:ro
   neo4j:
     environment:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
@@ -154,23 +160,7 @@ networks:
   memos_network:
     external: true
     name: synthetic-memory-bakeoff
-volumes:
-  synthetic-hf-cache:
-    external: true
 YAML
-
-docker volume create synthetic-hf-cache >/dev/null
-memos_image=synthetic-memos-memos
-if [[ "$memos_build_status" -eq 0 && -n "$memos_image" ]]; then
-  docker run --rm --network bridge -e HF_HOME=/root/.cache/huggingface -v synthetic-hf-cache:/root/.cache/huggingface \
-    "$memos_image" python -c 'from huggingface_hub import snapshot_download; snapshot_download("openai-community/gpt2", revision="607a30d783dfa663caf39e06633721c8d4cfcd7e", allow_patterns=["config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "vocab.json", "merges.txt"])'
-  docker run --rm --network none -e HF_HOME=/root/.cache/huggingface -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
-    -v synthetic-hf-cache:/root/.cache/huggingface:ro "$memos_image" \
-    python -c 'from transformers import AutoTokenizer; AutoTokenizer.from_pretrained("openai-community/gpt2"); print("offline_tokenizer=ready")'
-else
-  memos_build_status=1
-  printf 'MemOS image unavailable for pinned offline tokenizer preparation\n' > "$artifacts/memos-tokenizer-failure.txt"
-fi
 
 printf '\nMEMOS_STAGE_BEGIN\n'
 memo_status=0
