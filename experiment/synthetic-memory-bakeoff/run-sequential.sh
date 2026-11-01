@@ -15,6 +15,7 @@ cleanup() {
   docker rm -f tencent-memorycore >/dev/null 2>&1
   docker rm -f synthetic-ollama >/dev/null 2>&1
   docker network rm "$network" >/dev/null 2>&1
+  docker volume rm synthetic-hf-cache synthetic-ollama tencent-synthetic-data >/dev/null 2>&1
 }
 trap cleanup EXIT
 
@@ -37,7 +38,8 @@ cat > "$artifacts/sources.json" <<'JSON'
 {
   "memos": {"repository": "https://github.com/MemTensor/MemOS", "tag": "v2.0.34", "commit": "41bf5c7fa89ee08ebedf3c662638b06fc29aca8d", "stack": "official self-host REST API + Neo4j + Qdrant"},
   "tencentdb_agent_memory": {"repository": "https://github.com/Tencent/TencentDB-Agent-Memory", "tag": "v2.0.3", "commit": "084bed45cad6bb7f877455082cee82835d65671a", "stack": "official MemoryCore standalone + SQLite + FTS5/BM25"},
-  "inference": {"runtime": "local Ollama", "chat_model": "qwen3:0.6b", "embedding_model": "nomic-embed-text", "external_provider": false}
+  "inference": {"runtime": "local Ollama", "chat_model": "qwen3:0.6b", "embedding_model": "nomic-embed-text", "external_provider": false},
+  "tokenizer": {"repository": "https://huggingface.co/openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "runtime_cache_only": true}
 }
 JSON
 
@@ -100,6 +102,8 @@ for line in lines:
     if line.startswith("  ") and not line.startswith("    ") and line.rstrip().endswith(":"):
         service = line.strip()[:-1]
         skip_ports = False
+    if line.strip() == "- HF_ENDPOINT=https://hf-mirror.com":
+        continue
     if service in {"memos", "neo4j", "qdrant"} and line.strip() == "ports:":
         skip_ports = True
         continue
@@ -116,6 +120,9 @@ PY
 cat > "$work/memos/experiment-compose.yml" <<'YAML'
 services:
   memos:
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
     deploy:
       resources:
         limits:
@@ -123,6 +130,8 @@ services:
           memory: 4G
     networks:
       - memos_network
+    volumes:
+      - synthetic-hf-cache:/root/.cache/huggingface:ro
   neo4j:
     environment:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
@@ -145,7 +154,23 @@ networks:
   memos_network:
     external: true
     name: synthetic-memory-bakeoff
+volumes:
+  synthetic-hf-cache:
+    external: true
 YAML
+
+docker volume create synthetic-hf-cache >/dev/null
+memos_image="$(docker compose --env-file "$work/memos/.env" -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" images -q memos | head -n 1)"
+if [[ "$memos_build_status" -eq 0 && -n "$memos_image" ]]; then
+  docker run --rm --network bridge -e HF_HOME=/root/.cache/huggingface -v synthetic-hf-cache:/root/.cache/huggingface \
+    "$memos_image" python -c 'from huggingface_hub import snapshot_download; snapshot_download("openai-community/gpt2", revision="607a30d783dfa663caf39e06633721c8d4cfcd7e", allow_patterns=["config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "vocab.json", "merges.txt"])'
+  docker run --rm --network none -e HF_HOME=/root/.cache/huggingface -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
+    -v synthetic-hf-cache:/root/.cache/huggingface:ro "$memos_image" \
+    python -c 'from transformers import AutoTokenizer; AutoTokenizer.from_pretrained("openai-community/gpt2"); print("offline_tokenizer=ready")'
+else
+  memos_build_status=1
+  printf 'MemOS image unavailable for pinned offline tokenizer preparation\n' > "$artifacts/memos-tokenizer-failure.txt"
+fi
 
 printf '\nMEMOS_STAGE_BEGIN\n'
 memo_status=0

@@ -27,6 +27,9 @@ def request_json(url, payload=None, headers=None, method=None, timeout=180):
     except urllib.error.HTTPError as error:
         body = error.read()
         status = error.code
+    except urllib.error.URLError as error:
+        body = json.dumps({"error": str(error.reason)[:300]}).encode()
+        status = 0
     elapsed_ms = (time.perf_counter() - started) * 1000
     try:
         parsed = json.loads(body.decode("utf-8"))
@@ -96,6 +99,17 @@ def restart_container(name):
     return round((time.perf_counter() - started) * 1000, 2)
 
 
+def wait_for_health(base, timeout_seconds=90):
+    deadline = time.monotonic() + timeout_seconds
+    latest = None
+    while time.monotonic() < deadline:
+        latest = request_json(f"{base.rstrip('/')}/health", method="GET", timeout=5)
+        if successful(latest):
+            return latest
+        time.sleep(2)
+    return latest or {"http_status": 0, "elapsed_ms": 0, "body": {"error": "health timeout"}}
+
+
 def write_result(path, result):
     with open(path, "w", encoding="utf-8") as output:
         json.dump(result, output, ensure_ascii=False, indent=2)
@@ -156,8 +170,7 @@ def run_memos(corpus, base, result_dir):
         command.extend(["-p", compose_project, "-f", compose_file, "restart", "memos"])
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         result["restart"] = {"elapsed_ms": round((time.perf_counter() - started) * 1000, 2)}
-        time.sleep(3)
-        result["restart"]["health"] = request_json(f"{base}/health", method="GET", timeout=20)
+        result["restart"]["health"] = wait_for_health(base)
     all_memories = request_json(
         f"{base}/product/get_all",
         {"user_id": user_id, "mem_cube_ids": [cube_id], "memory_type": "text_mem"},
@@ -320,8 +333,11 @@ def run_tencent(corpus, base, result_dir):
     first_read = request_json(f"{base}/v3/conversation/search", {"query": first_case["query"], "limit": 20}, tencent_headers(identity, first_case["separate_query_chat_id"]), timeout=180)
     result["first_read_after_restart"] = {"http_status": first_read["http_status"], "latency_ms": first_read["elapsed_ms"]}
     result["restart"] = {"elapsed_ms": restart_container("tencent-memorycore")}
-    time.sleep(3)
-    result["restart"]["health"] = request_json(f"{base}/health", method="GET", timeout=20)
+    result["restart"]["health"] = wait_for_health(base)
+    if not successful(result["restart"]["health"]):
+        result["failures"].append({"stage": "restart_health", "http_status": result["restart"]["health"]["http_status"]})
+        write_result(os.path.join(result_dir, "tencentdb.json"), result)
+        return result
     searches = []
     for case in corpus["cases"]:
         response = request_json(
