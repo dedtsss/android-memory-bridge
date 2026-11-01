@@ -160,7 +160,7 @@ volumes:
 YAML
 
 docker volume create synthetic-hf-cache >/dev/null
-memos_image="$(docker compose --env-file "$work/memos/.env" -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" images -q memos | head -n 1)"
+memos_image=synthetic-memos-memos
 if [[ "$memos_build_status" -eq 0 && -n "$memos_image" ]]; then
   docker run --rm --network bridge -e HF_HOME=/root/.cache/huggingface -v synthetic-hf-cache:/root/.cache/huggingface \
     "$memos_image" python -c 'from huggingface_hub import snapshot_download; snapshot_download("openai-community/gpt2", revision="607a30d783dfa663caf39e06633721c8d4cfcd7e", allow_patterns=["config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "vocab.json", "merges.txt"])'
@@ -227,7 +227,7 @@ memory:
   pipeline:
     everyNConversations: 1
     enableWarmup: true
-    l1IdleTimeoutSeconds: 2
+  l1IdleTimeoutSeconds: 2
     l2DelayAfterL1Seconds: 2
     l2MinIntervalSeconds: 2
     l2MaxIntervalSeconds: 5
@@ -244,10 +244,12 @@ memory:
     enabled: true
     language: zh
 YAML
+gateway_api_key="$(openssl rand -hex 32)"
+sed -i '/^server:/a\  apiKey: "${TDAI_GATEWAY_API_KEY}"' "$work/tencent/tdai-gateway.standalone.yaml"
 ten_status=0
 if [[ "$ten_build_status" -eq 0 ]] && docker run -d --name tencent-memorycore --network "$network" --network-alias tencent-memorycore \
   --cpus 2 --memory 4g \
-  -e TDAI_LLM_API_KEY=local \
+  -e TDAI_LLM_API_KEY=local -e TDAI_GATEWAY_API_KEY="$gateway_api_key" \
   -v "$work/tencent/tdai-gateway.standalone.yaml:/data/config/tdai-gateway.yaml:ro" \
   -v tencent-synthetic-data:/data/tdai-memory \
   synthetic-tencent-memorycore:084bed45; then
@@ -263,7 +265,7 @@ else
 fi
 printf '\nTENCENTDB_STAGE_BEGIN\n'
 if [[ "$tencent_ready" -eq 1 ]]; then
-  TENCENTDB_URL="http://$tencent_ip:8420" python3 "$root/experiment/synthetic-memory-bakeoff/benchmark.py" tencentdb "$artifacts/corpus.json" "$artifacts" || ten_status=$?
+  TENCENTDB_URL="http://$tencent_ip:8420" TENCENTDB_API_KEY="$gateway_api_key" python3 "$root/experiment/synthetic-memory-bakeoff/benchmark.py" tencentdb "$artifacts/corpus.json" "$artifacts" || ten_status=$?
 else
   ten_status=1
   printf 'TencentDB MemoryCore image unavailable, did not start, or did not become healthy\n' > "$artifacts/tencent-failure.txt"
@@ -276,6 +278,7 @@ docker logs tencent-memorycore > "$artifacts/tencent-service.log" 2>&1 || true
 docker compose --env-file "$work/memos/.env" -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" down -v --remove-orphans
 docker rm -f tencent-memorycore synthetic-ollama >/dev/null
 docker network rm "$network"
+unset gateway_api_key
 trap - EXIT
 if [[ "$memo_status" -eq 0 && "$ten_status" -eq 0 ]]; then
   printf 'RESULT=SUCCESS\n'

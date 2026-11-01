@@ -269,6 +269,9 @@ def tencent_headers(identity, session_id=None):
         "x-tdai-agent-id": "synthetic-agent",
         "x-tdai-user-id": "synthetic-user",
     }
+    api_key = os.environ.get("TENCENTDB_API_KEY")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     if session_id:
         headers["x-tdai-session-id"] = session_id
     return headers
