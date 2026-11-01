@@ -100,21 +100,19 @@ def restart_container(name):
     return round((time.perf_counter() - started) * 1000, 2)
 
 
-def container_url(name, port):
+def container_state(name):
     completed = subprocess.run(
-        ["docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", name],
+        ["docker", "inspect", "-f", "{{.State.Status}}|{{.State.ExitCode}}|{{.RestartCount}}", name],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
-    address = completed.stdout.strip()
-    if not address:
-        raise RuntimeError(f"Container {name} has no network address")
-    return f"http://{address}:{port}"
+    status, exit_code, restart_count = completed.stdout.strip().split("|", maxsplit=2)
+    return {"status": status, "exit_code": int(exit_code), "restart_count": int(restart_count)}
 
 
-def wait_for_health(base, timeout_seconds=90):
+def wait_for_health(base, timeout_seconds=180):
     deadline = time.monotonic() + timeout_seconds
     latest = None
     while time.monotonic() < deadline:
@@ -185,8 +183,8 @@ def run_memos(corpus, base, result_dir):
         command.extend(["-p", compose_project, "-f", compose_file, "restart", "memos"])
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         result["restart"] = {"elapsed_ms": round((time.perf_counter() - started) * 1000, 2)}
-        base = container_url("memos-api-docker", 8000)
-        result["restart"]["base_url_refreshed"] = True
+        result["restart"]["container_state"] = container_state("memos-api-docker")
+        result["restart"]["stable_loopback_url"] = base == os.environ.get("MEMOS_URL", "").rstrip("/")
         result["restart"]["health"] = wait_for_health(base)
     all_memories = request_json(
         f"{base}/product/get_all",
@@ -359,7 +357,7 @@ def run_tencent(corpus, base, result_dir):
         result["failures"].append({"stage": "raw_integrity", "exact": result["raw_integrity"]["exact_transcripts_retrieved"], "expected": len(corpus["cases"])})
     layer_start = time.perf_counter()
     layer_history = []
-    while time.perf_counter() - layer_start < 180:
+    while time.perf_counter() - layer_start < 900:
         current = layer_counts(base, tencent_headers(identity, "lookup-layer-count"))
         layer_history.append({"elapsed_ms": round((time.perf_counter() - layer_start) * 1000, 2), "counts": current})
         for layer, data in current.items():
@@ -371,19 +369,19 @@ def run_tencent(corpus, base, result_dir):
     result["async_layers"] = {"lag_ms": layer_history[-1]["elapsed_ms"] if layer_history else None, "history": layer_history, "completed": bool(layer_history and all(number_of_records(layer_history[-1]["counts"], name) > 0 for name in ("L1_atomic", "L2_scenario", "L3_core")))}
     result["layer_counts"] = layer_history[-1]["counts"] if layer_history else {}
     if not result["async_layers"]["completed"]:
-        result["failures"].append({"stage": "async_layers", "detail": "L1/L2/L3 counts did not all become positive within 180 seconds"})
+        result["failures"].append({"stage": "async_layers", "detail": "L1/L2/L3 counts did not all become positive within 900 seconds"})
     result["no_decision_cases"] = [case["case_id"] for case in corpus["cases"] if case["status"] in NO_DECISION_STATUSES]
     first_case = corpus["cases"][0]
-    first_read = request_json(f"{base}/v3/conversation/search", {"query": first_case["query"], "limit": 20}, tencent_headers(identity), timeout=180)
-    result["first_read_after_restart"] = {"http_status": first_read["http_status"], "latency_ms": first_read["elapsed_ms"]}
     result["restart"] = {"elapsed_ms": restart_container("tencent-memorycore")}
-    base = container_url("tencent-memorycore", 8420)
-    result["restart"]["base_url_refreshed"] = True
+    result["restart"]["container_state"] = container_state("tencent-memorycore")
+    result["restart"]["stable_loopback_url"] = base == os.environ.get("TENCENTDB_URL", "").rstrip("/")
     result["restart"]["health"] = wait_for_health(base)
     if not successful(result["restart"]["health"]):
         result["failures"].append({"stage": "restart_health", "http_status": result["restart"]["health"]["http_status"]})
         write_result(os.path.join(result_dir, "tencentdb.json"), result)
         return result
+    first_read = request_json(f"{base}/v3/conversation/search", {"query": first_case["query"], "limit": 20}, tencent_headers(identity), timeout=180)
+    result["first_read_after_restart"] = {"http_status": first_read["http_status"], "latency_ms": first_read["elapsed_ms"]}
     searches = []
     for case in corpus["cases"]:
         response = request_json(

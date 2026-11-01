@@ -51,8 +51,9 @@ cat > "$artifacts/sources.json" <<'JSON'
 {
   "memos": {"repository": "https://github.com/MemTensor/MemOS", "tag": "v2.0.34", "commit": "41bf5c7fa89ee08ebedf3c662638b06fc29aca8d", "stack": "official self-host REST API + Neo4j + Qdrant"},
   "tencentdb_agent_memory": {"repository": "https://github.com/Tencent/TencentDB-Agent-Memory", "tag": "v2.0.3", "commit": "084bed45cad6bb7f877455082cee82835d65671a", "stack": "official MemoryCore standalone + SQLite + FTS5/BM25"},
-  "inference": {"runtime": "local Ollama", "chat_model": "qwen3:0.6b", "embedding_model": "nomic-embed-text", "external_provider": false},
-  "memos_chunker_config_override": {"upstream_default": "gpt2", "selected": "character", "reason": "official Chonkie built-in tokenizer avoids network downloads; overridden in four REST/default config sites only in ephemeral upstream checkout"}
+  "inference": {"runtime": "local Ollama", "chat_model": "qwen2.5:3b", "embedding_model": "nomic-embed-text", "external_provider": false},
+  "memos_chunker_config_override": {"upstream_default": "gpt2", "selected": "character", "reason": "official Chonkie built-in tokenizer avoids network downloads; overridden in four REST/default config sites only in ephemeral upstream checkout"},
+  "model_provenance": {"tag": "qwen2.5:3b", "publisher": "Alibaba Qwen", "license": "Qwen Research License Agreement; model weights are not redistributed", "source": "https://ollama.com/library/qwen2.5"}
 }
 JSON
 
@@ -64,24 +65,27 @@ for attempt in $(seq 1 60); do
   sleep 2
 done
 docker exec synthetic-ollama ollama list >/dev/null
-docker exec synthetic-ollama ollama pull qwen3:0.6b
+docker exec synthetic-ollama ollama pull qwen2.5:3b
 docker exec synthetic-ollama ollama pull nomic-embed-text
+docker exec synthetic-ollama ollama list > "$artifacts/local-ollama-models.txt"
+grep -q '^qwen2.5:3b' "$artifacts/local-ollama-models.txt"
+grep -q '^nomic-embed-text' "$artifacts/local-ollama-models.txt"
 docker network connect --alias ollama "$network" synthetic-ollama
 docker network disconnect bridge synthetic-ollama
 
 neo4j_password="$(openssl rand -hex 24)"
 cat > "$work/memos/.env" <<ENV
 MOS_CHAT_MODEL_PROVIDER=openai
-MOS_CHAT_MODEL=qwen3:0.6b
+MOS_CHAT_MODEL=qwen2.5:3b
 MOS_MAX_TOKENS=512
 OPENAI_API_KEY=local
 OPENAI_API_BASE=http://ollama:11434/v1
 QWEN_API_KEY=local
 QWEN_API_BASE=http://ollama:11434/v1
-MEMRADER_MODEL=qwen3:0.6b
+MEMRADER_MODEL=qwen2.5:3b
 MEMRADER_API_KEY=local
 MEMRADER_API_BASE=http://ollama:11434/v1
-MEMREADER_GENERAL_MODEL=qwen3:0.6b
+MEMREADER_GENERAL_MODEL=qwen2.5:3b
 MOS_EMBEDDER_BACKEND=ollama
 MOS_EMBEDDER_MODEL=nomic-embed-text
 EMBEDDING_DIMENSION=768
@@ -96,11 +100,6 @@ if ! docker compose -p "$compose_project" -f "$work/memos/docker/docker-compose.
    ! docker compose -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" build memos; then
   memos_build_status=1
   printf 'MemOS image build or upstream dependency pull failed\n' > "$artifacts/memos-build-failure.txt"
-fi
-ten_build_status=0
-if ! docker build -t synthetic-tencent-memorycore:084bed45 "$work/tencent/MemoryCore"; then
-  ten_build_status=1
-  printf 'TencentDB MemoryCore image build failed\n' > "$artifacts/tencent-build-failure.txt"
 fi
 python3 - "$work/memos/docker/docker-compose.yml" <<'PY'
 import pathlib
@@ -133,6 +132,8 @@ PY
 cat > "$work/memos/experiment-compose.yml" <<'YAML'
 services:
   memos:
+    ports:
+      - "127.0.0.1:18000:8000"
     deploy:
       resources:
         limits:
@@ -168,28 +169,30 @@ printf '\nMEMOS_STAGE_BEGIN\n'
 memo_status=0
 if [[ "$memos_build_status" -eq 0 ]] && docker compose --env-file "$work/memos/.env" -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" up -d; then
   dependencies_ready=0
-  neo4j_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' neo4j-docker)"
   qdrant_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' qdrant-docker)"
+  neo4j_password="$(sed -n 's/^NEO4J_PASSWORD=//p' "$work/memos/.env")"
   for attempt in $(seq 1 60); do
-    neo4j_status="$(curl -sS -o /dev/null -w '%{http_code}' "http://$neo4j_ip:7474/" || true)"
+    neo4j_status="not_ready"
+    if docker exec neo4j-docker cypher-shell -u neo4j -p "$neo4j_password" 'RETURN 1' >/dev/null 2>&1; then neo4j_status="bolt_ready"; fi
     qdrant_status="$(curl -sS -o /dev/null -w '%{http_code}' "http://$qdrant_ip:6333/readyz" || true)"
-    if [[ "$neo4j_status" =~ ^(200|401)$ && "$qdrant_status" == "200" ]]; then
+    if [[ "$neo4j_status" == "bolt_ready" && "$qdrant_status" == "200" ]]; then
       dependencies_ready=1
       break
     fi
     sleep 5
   done
-  printf 'neo4j_http_status=%s\nqdrant_readyz_status=%s\n' "$neo4j_status" "$qdrant_status" > "$artifacts/memos-dependency-readiness.txt"
+  unset neo4j_password
+  printf 'neo4j_bolt=%s\nqdrant_readyz_status=%s\n' "$neo4j_status" "$qdrant_status" > "$artifacts/memos-dependency-readiness.txt"
   memos_ready=0
   if [[ "$dependencies_ready" -eq 1 ]]; then
-  memos_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' memos-api-docker)"
   for attempt in $(seq 1 36); do
-    if curl -fsS "http://$memos_ip:8000/health" > "$artifacts/memos-health.json" 2>/dev/null; then memos_ready=1; break; fi
+    if curl -fsS "http://127.0.0.1:18000/health" > "$artifacts/memos-health.json" 2>/dev/null; then memos_ready=1; break; fi
     sleep 5
   done
   fi
   if [[ "$memos_ready" -eq 1 ]]; then
-    MEMOS_URL="http://$memos_ip:8000" MEMOS_COMPOSE_FILE="$work/memos/docker/docker-compose.yml" MEMOS_COMPOSE_PROJECT="$compose_project" MEMOS_COMPOSE_ENV_FILE="$work/memos/.env" \
+    [[ "$(docker port memos-api-docker 8000/tcp)" == "127.0.0.1:18000" ]]
+    MEMOS_URL="http://127.0.0.1:18000" MEMOS_COMPOSE_FILE="$work/memos/docker/docker-compose.yml" MEMOS_COMPOSE_PROJECT="$compose_project" MEMOS_COMPOSE_ENV_FILE="$work/memos/.env" \
       python3 "$root/experiment/synthetic-memory-bakeoff/benchmark.py" memos "$artifacts/corpus.json" "$artifacts" || memo_status=$?
   else
     memo_status=1
@@ -204,6 +207,9 @@ printf 'MEMOS_BENCHMARK_EXIT=%s\n' "$memo_status" | tee "$artifacts/memos-exit.t
 docker stats --no-stream --format '{{.Name}} {{.CPUPerc}} {{.MemUsage}}' memos-api-docker neo4j-docker qdrant-docker > "$artifacts/memos-resource-snapshot.txt" 2>&1 || true
 docker system df > "$artifacts/memos-docker-disk.txt" 2>&1 || true
 docker compose --env-file "$work/memos/.env" -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" down -v --remove-orphans
+docker builder prune --all --force
+docker image prune --all --force
+docker system df > "$artifacts/post-memos-cleanup-disk.txt" 2>&1 || true
 printf 'MEMOS_STAGE_END\n'
 
 cat > "$work/tencent/tdai-gateway.standalone.yaml" <<'YAML'
@@ -215,12 +221,11 @@ server:
 data:
   baseDir: /data/tdai-memory
 llm:
-  enabled: true
   baseUrl: http://ollama:11434/v1
   apiKey: local
-  model: qwen3:0.6b
-  maxTokens: 512
-  timeoutMs: 120000
+  model: qwen2.5:3b
+  maxTokens: 2048
+  timeoutMs: 300000
 memory:
   capture:
     enabled: true
@@ -229,7 +234,7 @@ memory:
     enableDedup: true
     maxMemoriesPerSession: 20
   persona:
-    triggerEveryN: 50
+    triggerEveryN: 1
     maxScenes: 15
     triggerMode: current
   pipeline:
@@ -244,7 +249,7 @@ memory:
     maxResults: 20
     scoreThreshold: 0.0
     strategy: hybrid
-    timeoutMs: 120000
+    timeoutMs: 300000
   storeBackend: sqlite
   embedding:
     provider: none
@@ -259,17 +264,22 @@ upstream:
 YAML
 gateway_api_key="$(openssl rand -hex 32)"
 sed -i '/^server:/a\  apiKey: "${TDAI_GATEWAY_API_KEY}"' "$work/tencent/tdai-gateway.standalone.yaml"
+ten_build_status=0
+if ! docker build -t synthetic-tencent-memorycore:084bed45 "$work/tencent/MemoryCore"; then
+  ten_build_status=1
+  printf 'TencentDB MemoryCore image build failed\n' > "$artifacts/tencent-build-failure.txt"
+fi
 ten_status=0
 if [[ "$ten_build_status" -eq 0 ]] && docker run -d --name tencent-memorycore --network "$network" --network-alias tencent-memorycore \
   --cpus 2 --memory 4g \
   -e TDAI_LLM_API_KEY=local -e TDAI_GATEWAY_API_KEY="$gateway_api_key" \
+  -p 127.0.0.1:18420:8420 \
   -v "$work/tencent/tdai-gateway.standalone.yaml:/data/config/tdai-gateway.yaml:ro" \
   -v tencent-synthetic-data:/data/tdai-memory \
   synthetic-tencent-memorycore:084bed45; then
   tencent_ready=0
-  tencent_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' tencent-memorycore)"
   for attempt in $(seq 1 36); do
-    if curl -fsS "http://$tencent_ip:8420/health" > "$artifacts/tencent-health.json" 2>/dev/null; then tencent_ready=1; break; fi
+    if curl -fsS "http://127.0.0.1:18420/health" > "$artifacts/tencent-health.json" 2>/dev/null; then tencent_ready=1; break; fi
     sleep 5
   done
 else
@@ -278,7 +288,8 @@ else
 fi
 printf '\nTENCENTDB_STAGE_BEGIN\n'
 if [[ "$tencent_ready" -eq 1 ]]; then
-  TENCENTDB_URL="http://$tencent_ip:8420" TENCENTDB_API_KEY="$gateway_api_key" python3 "$root/experiment/synthetic-memory-bakeoff/benchmark.py" tencentdb "$artifacts/corpus.json" "$artifacts" || ten_status=$?
+  [[ "$(docker port tencent-memorycore 8420/tcp)" == "127.0.0.1:18420" ]]
+  TENCENTDB_URL="http://127.0.0.1:18420" TENCENTDB_API_KEY="$gateway_api_key" python3 "$root/experiment/synthetic-memory-bakeoff/benchmark.py" tencentdb "$artifacts/corpus.json" "$artifacts" || ten_status=$?
 else
   ten_status=1
   printf 'TencentDB MemoryCore image unavailable, did not start, or did not become healthy\n' > "$artifacts/tencent-failure.txt"
