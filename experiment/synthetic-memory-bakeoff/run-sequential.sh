@@ -27,6 +27,7 @@ df -h /
 test "$(nproc)" -ge 4
 test "$(df -Pk / | awk 'NR==2 {print $4}')" -ge 20000000
 docker info --format 'docker_cpus={{.NCPU}} docker_memory_bytes={{.MemTotal}}'
+test -S /var/run/docker.sock
 python3 "$root/experiment/synthetic-memory-bakeoff/corpus.py" "$artifacts/corpus.json"
 python3 -m py_compile "$root/experiment/synthetic-memory-bakeoff/corpus.py" "$root/experiment/synthetic-memory-bakeoff/benchmark.py"
 
@@ -51,15 +52,39 @@ cat > "$artifacts/sources.json" <<'JSON'
 {
   "memos": {"repository": "https://github.com/MemTensor/MemOS", "tag": "v2.0.34", "commit": "41bf5c7fa89ee08ebedf3c662638b06fc29aca8d", "stack": "official self-host REST API + Neo4j + Qdrant"},
   "tencentdb_agent_memory": {"repository": "https://github.com/Tencent/TencentDB-Agent-Memory", "tag": "v2.0.3", "commit": "084bed45cad6bb7f877455082cee82835d65671a", "stack": "official MemoryCore standalone + SQLite + FTS5/BM25"},
-  "inference": {"runtime": "local Ollama", "chat_model": "qwen2.5:3b", "embedding_model": "nomic-embed-text", "external_provider": false},
+  "inference": {"runtime": "local Ollama", "chat_model": "qwen2.5:3b", "embedding_model": "nomic-embed-text:latest", "external_provider": false},
   "memos_chunker_config_override": {"upstream_default": "gpt2", "selected": "character", "reason": "official Chonkie built-in tokenizer avoids network downloads; overridden in four REST/default config sites only in ephemeral upstream checkout"},
   "model_provenance": {"tag": "qwen2.5:3b", "publisher": "Alibaba Qwen", "license": "Qwen Research License Agreement; model weights are not redistributed", "source": "https://ollama.com/library/qwen2.5"}
 }
 JSON
 
+docker pull python:3.12-slim-bookworm
+benchmark_image="$(docker image inspect -f '{{index .RepoDigests 0}}' python:3.12-slim-bookworm)"
+test -n "$benchmark_image"
+python3 - "$artifacts/sources.json" "$benchmark_image" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+sources = json.loads(path.read_text())
+sources["benchmark_runtime"] = {"image": sys.argv[2], "source": "https://hub.docker.com/_/python"}
+path.write_text(json.dumps(sources, ensure_ascii=False, indent=2) + "\n")
+PY
+
+run_benchmark() {
+  local engine="$1"
+  docker run --rm --network "$network" --cpus 0.25 --memory 256m \
+    --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
+    --mount type=bind,source="$root/experiment/synthetic-memory-bakeoff/benchmark.py",target=/benchmark.py,readonly \
+    --mount type=bind,source="$artifacts",target=/results \
+    -e "${engine^^}_URL=$2" -e "TENCENTDB_API_KEY=${TENCENTDB_API_KEY:-}" \
+    "$benchmark_image" python /benchmark.py "$engine" /results/corpus.json /results
+}
+
 docker network create --internal "$network"
 docker pull ollama/ollama:0.40.13
-docker run -d --name synthetic-ollama --cpus 2 --memory 5g -v synthetic-ollama:/root/.ollama ollama/ollama:0.40.13
+docker run -d --name synthetic-ollama --cpus 1.5 --memory 5g -v synthetic-ollama:/root/.ollama ollama/ollama:0.40.13
 for attempt in $(seq 1 60); do
   if docker exec synthetic-ollama ollama list >/dev/null 2>&1; then break; fi
   sleep 2
@@ -87,7 +112,7 @@ MEMRADER_API_KEY=local
 MEMRADER_API_BASE=http://ollama:11434/v1
 MEMREADER_GENERAL_MODEL=qwen2.5:3b
 MOS_EMBEDDER_BACKEND=ollama
-MOS_EMBEDDER_MODEL=nomic-embed-text
+MOS_EMBEDDER_MODEL=nomic-embed-text:latest
 EMBEDDING_DIMENSION=768
 OLLAMA_API_BASE=http://ollama:11434
 MOS_RERANKER_BACKEND=cosine_local
@@ -132,12 +157,10 @@ PY
 cat > "$work/memos/experiment-compose.yml" <<'YAML'
 services:
   memos:
-    ports:
-      - "127.0.0.1:18000:8000"
     deploy:
       resources:
         limits:
-          cpus: "1.5"
+          cpus: "0.75"
           memory: 4G
     networks:
       - memos_network
@@ -185,22 +208,10 @@ if [[ "$memos_build_status" -eq 0 ]] && docker compose --env-file "$work/memos/.
   printf 'neo4j_bolt=%s\nqdrant_readyz_status=%s\n' "$neo4j_status" "$qdrant_status" > "$artifacts/memos-dependency-readiness.txt"
   memos_ready=0
   if [[ "$dependencies_ready" -eq 1 ]] && docker compose --env-file "$work/memos/.env" -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" up -d memos; then
-    for attempt in $(seq 1 36); do
-      memos_http_status="$(curl -sS --connect-timeout 3 --max-time 5 -o "$artifacts/memos-health.json" -w '%{http_code}' http://127.0.0.1:18000/health 2>/dev/null || true)"
-      if [[ "$memos_http_status" == "200" ]]; then memos_ready=1; break; fi
-      sleep 5
-    done
+    memos_ready=1
   fi
-  memos_binding="$(docker port memos-api-docker 8000/tcp 2>/dev/null || true)"
-  printf 'loopback_binding=%s\nhealth_http_status=%s\n' "$memos_binding" "${memos_http_status:-not_started}" > "$artifacts/memos-api-readiness.txt"
   if [[ "$memos_ready" -eq 1 ]]; then
-    if [[ "$memos_binding" == "127.0.0.1:18000" ]]; then
-      MEMOS_URL="http://127.0.0.1:18000" MEMOS_COMPOSE_FILE="$work/memos/docker/docker-compose.yml" MEMOS_COMPOSE_PROJECT="$compose_project" MEMOS_COMPOSE_ENV_FILE="$work/memos/.env" \
-        python3 "$root/experiment/synthetic-memory-bakeoff/benchmark.py" memos "$artifacts/corpus.json" "$artifacts" || memo_status=$?
-    else
-      memo_status=1
-      printf 'MemOS test port was not bound exclusively to runner loopback\n' > "$artifacts/memos-failure.txt"
-    fi
+    MEMOS_URL="http://memos:8000" run_benchmark memos "http://memos:8000" || memo_status=$?
   else
     memo_status=1
     printf 'MemOS dependencies/API did not become ready; see bounded readiness artifacts\n' > "$artifacts/memos-failure.txt"
@@ -217,6 +228,7 @@ docker compose --env-file "$work/memos/.env" -p "$compose_project" -f "$work/mem
 docker builder prune --all --force
 docker image prune --all --force
 docker system df > "$artifacts/post-memos-cleanup-disk.txt" 2>&1 || true
+docker pull "$benchmark_image"
 printf 'MEMOS_STAGE_END\n'
 
 cat > "$work/tencent/tdai-gateway.standalone.yaml" <<'YAML'
@@ -280,36 +292,24 @@ ten_status=0
 if [[ "$ten_build_status" -eq 0 ]] && docker run -d --name tencent-memorycore --network "$network" --network-alias tencent-memorycore \
   --cpus 2 --memory 4g \
   -e TDAI_LLM_API_KEY=local -e TDAI_GATEWAY_API_KEY="$gateway_api_key" \
-  -p 127.0.0.1:18420:8420 \
   -v "$work/tencent/tdai-gateway.standalone.yaml:/data/config/tdai-gateway.yaml:ro" \
   -v tencent-synthetic-data:/data/tdai-memory \
   synthetic-tencent-memorycore:084bed45; then
-  tencent_ready=0
-  tencent_http_status="not_probed"
-  tencent_binding="$(docker port tencent-memorycore 8420/tcp 2>/dev/null || true)"
-  if [[ "$tencent_binding" == "127.0.0.1:18420" ]]; then
-    for attempt in $(seq 1 36); do
-      tencent_http_status="$(curl -sS --connect-timeout 3 --max-time 5 -o "$artifacts/tencent-health.json" -w '%{http_code}' http://127.0.0.1:18420/health 2>/dev/null || true)"
-      if [[ "$tencent_http_status" == "200" ]]; then tencent_ready=1; break; fi
-      sleep 5
-    done
-  fi
+  tencent_ready=1
   tencent_state="$(docker inspect -f '{{.State.Status}}|{{.State.ExitCode}}|{{.RestartCount}}' tencent-memorycore 2>/dev/null || printf 'missing')"
-  printf 'loopback_binding=%s\nhealth_http_status=%s\ncontainer_state=%s\n' "$tencent_binding" "$tencent_http_status" "$tencent_state" > "$artifacts/tencent-api-readiness.txt"
+  printf 'container_state=%s\n' "$tencent_state" > "$artifacts/tencent-api-readiness.txt"
 else
   tencent_ready=0
   ten_status=1
-  tencent_http_status="not_started"
-  tencent_binding="unavailable"
   tencent_state="missing"
-  printf 'loopback_binding=%s\nhealth_http_status=%s\ncontainer_state=%s\n' "$tencent_binding" "$tencent_http_status" "$tencent_state" > "$artifacts/tencent-api-readiness.txt"
+  printf 'container_state=%s\n' "$tencent_state" > "$artifacts/tencent-api-readiness.txt"
 fi
 printf '\nTENCENTDB_STAGE_BEGIN\n'
 if [[ "$tencent_ready" -eq 1 ]]; then
-  TENCENTDB_URL="http://127.0.0.1:18420" TENCENTDB_API_KEY="$gateway_api_key" python3 "$root/experiment/synthetic-memory-bakeoff/benchmark.py" tencentdb "$artifacts/corpus.json" "$artifacts" || ten_status=$?
+  TENCENTDB_API_KEY="$gateway_api_key" run_benchmark tencentdb "http://tencent-memorycore:8420" || ten_status=$?
 else
   ten_status=1
-  printf 'TencentDB API not ready on verified loopback; see tencent-api-readiness.txt\n' > "$artifacts/tencent-failure.txt"
+  printf 'TencentDB benchmark client failed; inspect tencentdb.json and bounded service logs\n' > "$artifacts/tencent-failure.txt"
 fi
 printf 'TENCENTDB_BENCHMARK_EXIT=%s\n' "$ten_status" | tee "$artifacts/tencent-exit.txt"
 printf 'TENCENTDB_STAGE_END\n'

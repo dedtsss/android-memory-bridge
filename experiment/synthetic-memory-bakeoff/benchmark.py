@@ -1,7 +1,8 @@
 import json
+import http.client
 import math
 import os
-import subprocess
+import socket
 import sys
 import time
 from collections import Counter, defaultdict
@@ -94,22 +95,39 @@ def number_of_records(counts, name):
     return data.get("total", 0) if isinstance(data, dict) else 0
 
 
+class DockerSocketConnection(http.client.HTTPConnection):
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect("/var/run/docker.sock")
+
+
+def docker_api_request(method, path):
+    connection = DockerSocketConnection("localhost", timeout=60)
+    connection.request(method, f"/v1.41{path}")
+    response = connection.getresponse()
+    body = response.read()
+    status = response.status
+    connection.close()
+    if status >= 300:
+        raise RuntimeError(f"Docker API operation failed with HTTP {status}")
+    return status, body
+
+
 def restart_container(name):
     started = time.perf_counter()
-    subprocess.run(["docker", "restart", name], check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    docker_api_request("POST", f"/containers/{urllib.parse.quote(name, safe='')}/restart?t=10")
     return round((time.perf_counter() - started) * 1000, 2)
 
 
 def container_state(name):
-    completed = subprocess.run(
-        ["docker", "inspect", "-f", "{{.State.Status}}|{{.State.ExitCode}}|{{.RestartCount}}", name],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    status, exit_code, restart_count = completed.stdout.strip().split("|", maxsplit=2)
-    return {"status": status, "exit_code": int(exit_code), "restart_count": int(restart_count)}
+    _, body = docker_api_request("GET", f"/containers/{urllib.parse.quote(name, safe='')}/json")
+    state = json.loads(body)
+    return {
+        "status": state["State"]["Status"],
+        "exit_code": int(state["State"]["ExitCode"]),
+        "restart_count": int(state["RestartCount"]),
+    }
 
 
 def wait_for_health(base, timeout_seconds=180):
@@ -138,7 +156,7 @@ def run_memos(corpus, base, result_dir):
     cube_id = "synthetic-bakeoff-cube"
     base = base.rstrip("/")
     result = {"engine": "MemOS self-host REST", "writes": [], "searches": [], "failures": []}
-    health = request_json(f"{base}/health", method="GET", timeout=15)
+    health = wait_for_health(base)
     result["health"] = health
     if not successful(health):
         raise RuntimeError("MemOS health check failed")
@@ -172,20 +190,10 @@ def run_memos(corpus, base, result_dir):
     result["async_wait"] = request_json(f"{base}/product/scheduler/wait?{wait_query}", {}, memos_headers(), method="POST", timeout=330)
     if not successful(result["async_wait"]):
         result["failures"].append({"stage": "async_wait", "http_status": result["async_wait"]["http_status"]})
-    compose_file = os.environ.get("MEMOS_COMPOSE_FILE")
-    compose_env_file = os.environ.get("MEMOS_COMPOSE_ENV_FILE")
-    compose_project = os.environ.get("MEMOS_COMPOSE_PROJECT", "bakeoff-memos")
-    if compose_file:
-        started = time.perf_counter()
-        command = ["docker", "compose"]
-        if compose_env_file:
-            command.extend(["--env-file", compose_env_file])
-        command.extend(["-p", compose_project, "-f", compose_file, "restart", "memos"])
-        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        result["restart"] = {"elapsed_ms": round((time.perf_counter() - started) * 1000, 2)}
-        result["restart"]["container_state"] = container_state("memos-api-docker")
-        result["restart"]["stable_loopback_url"] = base == os.environ.get("MEMOS_URL", "").rstrip("/")
-        result["restart"]["health"] = wait_for_health(base)
+    result["restart"] = {"elapsed_ms": restart_container("memos-api-docker")}
+    result["restart"]["container_state"] = container_state("memos-api-docker")
+    result["restart"]["stable_service_dns"] = base == os.environ.get("MEMOS_URL", "").rstrip("/")
+    result["restart"]["health"] = wait_for_health(base)
     all_memories = request_json(
         f"{base}/product/get_all",
         {"user_id": user_id, "mem_cube_ids": [cube_id], "memory_type": "text_mem"},
@@ -295,7 +303,7 @@ def tencent_headers(identity, session_id=None):
 def run_tencent(corpus, base, result_dir):
     base = base.rstrip("/")
     result = {"engine": "TencentDB-Agent-Memory MemoryCore standalone", "writes": [], "raw_queries": [], "searches": [], "failures": []}
-    health = request_json(f"{base}/health", method="GET", timeout=15)
+    health = wait_for_health(base)
     result["health"] = health
     if not successful(health):
         raise RuntimeError("TencentDB MemoryCore health check failed")
@@ -374,7 +382,7 @@ def run_tencent(corpus, base, result_dir):
     first_case = corpus["cases"][0]
     result["restart"] = {"elapsed_ms": restart_container("tencent-memorycore")}
     result["restart"]["container_state"] = container_state("tencent-memorycore")
-    result["restart"]["stable_loopback_url"] = base == os.environ.get("TENCENTDB_URL", "").rstrip("/")
+    result["restart"]["stable_service_dns"] = base == os.environ.get("TENCENTDB_URL", "").rstrip("/")
     result["restart"]["health"] = wait_for_health(base)
     if not successful(result["restart"]["health"]):
         result["failures"].append({"stage": "restart_health", "http_status": result["restart"]["health"]["http_status"]})
