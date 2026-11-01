@@ -42,7 +42,7 @@ def request_json(url, payload=None, headers=None, method=None, timeout=180):
 
 def successful(response):
     body = response["body"]
-    return response["http_status"] < 400 and isinstance(body, dict) and body.get("code", 0) in (0, "0", 200, "200")
+    return 200 <= response["http_status"] < 400 and isinstance(body, dict) and body.get("code", 0) in (0, "0", 200, "200")
 
 
 def percentile(values, fraction):
@@ -130,7 +130,7 @@ def container_state(name):
     }
 
 
-def wait_for_health(base, timeout_seconds=180):
+def wait_for_health(base, timeout_seconds=300):
     deadline = time.monotonic() + timeout_seconds
     latest = None
     while time.monotonic() < deadline:
@@ -159,6 +159,8 @@ def run_memos(corpus, base, result_dir):
     health = wait_for_health(base)
     result["health"] = health
     if not successful(health):
+        result["failures"].append({"stage": "health", "http_status": health["http_status"]})
+        write_result(os.path.join(result_dir, "memos.json"), result)
         raise RuntimeError("MemOS health check failed")
     created = request_json(f"{base}/product/create_cube", {"cube_name": "Synthetic bakeoff", "owner_id": user_id, "cube_id": cube_id}, memos_headers())
     result["cube"] = created["body"]
@@ -260,8 +262,8 @@ def run_memos(corpus, base, result_dir):
         if not successful(search):
             result["failures"].append({"stage": "search", "case_id": case["case_id"], "http_status": search["http_status"]})
     result["searches"] = queries
-    result["search_latency"] = stats([row["latency_ms"] for row in queries if row["http_status"] < 400])
-    result["warm_search_latency"] = stats([row["latency_ms"] for row in queries[1:] if row["http_status"] < 400])
+    result["search_latency"] = stats([row["latency_ms"] for row in queries if 200 <= row["http_status"] < 400])
+    result["warm_search_latency"] = stats([row["latency_ms"] for row in queries[1:] if 200 <= row["http_status"] < 400])
     result["recall_at_20"] = round(sum(row["source_found"] for row in queries) / max(1, len(queries)), 4)
     result["citation_rate"] = round(sum(row["citation_source_id_found"] for row in queries) / max(1, len(queries)), 4)
     result["exact_raw_search_rate"] = round(sum(row["exact_raw_transcript_retrieved"] for row in queries) / max(1, len(queries)), 4)
@@ -306,10 +308,14 @@ def run_tencent(corpus, base, result_dir):
     health = wait_for_health(base)
     result["health"] = health
     if not successful(health):
+        result["failures"].append({"stage": "health", "http_status": health["http_status"]})
+        write_result(os.path.join(result_dir, "tencentdb.json"), result)
         raise RuntimeError("TencentDB MemoryCore health check failed")
     fts_values = list(walk_key(health["body"], "ftsAvailable")) + list(walk_key(health["body"], "fts_available"))
     result["fts5_available"] = fts_values[-1] if fts_values else None
     if result["fts5_available"] is not True:
+        result["failures"].append({"stage": "fts5_health", "available": result["fts5_available"]})
+        write_result(os.path.join(result_dir, "tencentdb.json"), result)
         raise RuntimeError("TencentDB reports FTS5 unavailable or does not expose a positive FTS5 health signal")
     identity = "synthetic-team/synthetic-agent/synthetic-user"
     admin = request_json(
@@ -369,7 +375,7 @@ def run_tencent(corpus, base, result_dir):
         current = layer_counts(base, tencent_headers(identity, "lookup-layer-count"))
         layer_history.append({"elapsed_ms": round((time.perf_counter() - layer_start) * 1000, 2), "counts": current})
         for layer, data in current.items():
-            if data["http_status"] >= 400:
+            if not 200 <= data["http_status"] < 400:
                 result["failures"].append({"stage": "async_layer_count", "layer": layer, "http_status": data["http_status"]})
         if all(number_of_records(current, name) > 0 for name in ("L1_atomic", "L2_scenario", "L3_core")):
             break
@@ -426,8 +432,8 @@ def run_tencent(corpus, base, result_dir):
         if not successful(response):
             result["failures"].append({"stage": "search", "case_id": case["case_id"], "http_status": response["http_status"]})
     result["searches"] = searches
-    result["search_latency"] = stats([row["latency_ms"] for row in searches if row["http_status"] < 400])
-    result["warm_search_latency"] = stats([row["latency_ms"] for row in searches[1:] if row["http_status"] < 400])
+    result["search_latency"] = stats([row["latency_ms"] for row in searches if 200 <= row["http_status"] < 400])
+    result["warm_search_latency"] = stats([row["latency_ms"] for row in searches[1:] if 200 <= row["http_status"] < 400])
     result["recall_at_20"] = round(sum(row["source_found"] for row in searches) / max(1, len(searches)), 4)
     result["citation_rate"] = round(sum(bool(row["citation_message_ids"]) for row in searches) / max(1, len(searches)), 4)
     result["raw_source_order_exact_cases"] = sum(row["source_order_exact"] for row in result["raw_queries"])
@@ -450,7 +456,7 @@ def run_tencent(corpus, base, result_dir):
     }
     result["layer_counts_after_restart"] = layer_counts(base, tencent_headers(identity, "lookup-layer-count"))
     for layer, data in result["layer_counts_after_restart"].items():
-        if data["http_status"] >= 400:
+        if not 200 <= data["http_status"] < 400:
             result["failures"].append({"stage": "restart_layer_count", "layer": layer, "http_status": data["http_status"]})
     for layer in ("L1_atomic", "L2_scenario", "L3_core"):
         before = number_of_records(result["layer_counts"], layer)
