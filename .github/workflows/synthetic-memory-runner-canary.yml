@@ -1,0 +1,32 @@
+name: Synthetic memory runner canary
+
+on:
+  push:
+    branches:
+      - codex/synthetic-memory-runner-canary-20261101
+
+permissions:
+  contents: read
+
+concurrency:
+  group: synthetic-memory-runner-canary
+  cancel-in-progress: true
+
+jobs:
+  canary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Verify runner identity and capacity
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'repository=%s\nactor=%s\nref=%s\n' "$GITHUB_REPOSITORY" "$GITHUB_ACTOR" "$GITHUB_REF"
+          printf 'runner_user=%s\n' "$(id -un)"
+          nproc
+          free -h
+          df -h /
+          docker version --format 'client={{.Client.Version}} server={{.Server.Version}}'
+          docker info --format 'cpus={{.NCPU}} memory_bytes={{.MemTotal}} root={{.DockerRootDir}}'
+          docker run --rm --network none --memory=128m --cpus=1 --pids-limit=64 alpine:3.22 sh -ec 'test "$(id -u)" -eq 0; printf "isolated_container=ok\n"'
+          docker image rm alpine:3.22

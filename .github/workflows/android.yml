@@ -3,6 +3,8 @@ name: Android CI
 on:
   pull_request:
   push:
+    branches-ignore:
+      - codex/synthetic-memory-runner-canary-20261101
 
 permissions:
   contents: read
