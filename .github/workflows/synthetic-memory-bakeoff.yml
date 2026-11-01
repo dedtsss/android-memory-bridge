@@ -1,0 +1,32 @@
+name: Synthetic memory bakeoff
+
+on:
+  push:
+    branches:
+      - codex/synthetic-memory-runner-canary-20261101
+
+permissions:
+  contents: read
+
+concurrency:
+  group: synthetic-memory-bakeoff
+  cancel-in-progress: false
+
+jobs:
+  sequential-bakeoff:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 210
+    steps:
+      - name: Check out synthetic harness
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Run pinned stacks sequentially
+        shell: bash
+        run: bash experiment/synthetic-memory-bakeoff/run-sequential.sh
+      - name: Upload synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: synthetic-memory-bakeoff-${{ github.run_id }}
+          path: experiment/synthetic-memory-bakeoff/results/
+          if-no-files-found: warn
+          retention-days: 90
