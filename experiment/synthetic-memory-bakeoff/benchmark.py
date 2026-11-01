@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import time
+from collections import Counter, defaultdict
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -306,11 +307,18 @@ def run_tencent(corpus, base, result_dir):
         )
         returned = response["body"].get("data", {}).get("messages", [])
         expected = case["messages"]
-        exact = len(returned) == len(expected) and all(
-            got.get("role") == want["role"] and got.get("content") == want["content"] and got.get("timestamp") == want["timestamp"]
-            for got, want in zip(returned, expected)
-        )
-        row = {"case_id": case["case_id"], "source_chat_id": case["source_chat_id"], "expected_messages": len(expected), "returned_messages": len(returned), "exact_raw_integrity": exact, "http_status": response["http_status"], "source_turn_ids": [item.get("id") for item in returned], "messages": returned}
+        expected_keys = [(item["role"], item["content"], item["timestamp"]) for item in expected]
+        returned_keys = [(item.get("role"), item.get("content"), item.get("timestamp", item.get("recorded_at"))) for item in returned]
+        exact = Counter(returned_keys) == Counter(expected_keys)
+        source_ids_by_key = defaultdict(list)
+        for item in expected:
+            source_ids_by_key[(item["role"], item["content"], item["timestamp"])].append(item["id"])
+        mapped_source_ids = []
+        for key in returned_keys:
+            ids = source_ids_by_key[key]
+            mapped_source_ids.append(ids.pop(0) if ids else None)
+        order_exact = returned_keys == expected_keys
+        row = {"case_id": case["case_id"], "source_chat_id": case["source_chat_id"], "expected_messages": len(expected), "returned_messages": len(returned), "exact_raw_integrity": exact, "source_order_exact": order_exact, "source_turn_ids": mapped_source_ids, "http_status": response["http_status"], "messages": returned}
         raw_cases.append(row)
         result["raw_queries"].append(row)
         if not successful(response):
@@ -331,9 +339,11 @@ def run_tencent(corpus, base, result_dir):
         time.sleep(3)
     result["async_layers"] = {"lag_ms": layer_history[-1]["elapsed_ms"] if layer_history else None, "history": layer_history, "completed": bool(layer_history and all(number_of_records(layer_history[-1]["counts"], name) > 0 for name in ("L1_atomic", "L2_scenario", "L3_core")))}
     result["layer_counts"] = layer_history[-1]["counts"] if layer_history else {}
+    if not result["async_layers"]["completed"]:
+        result["failures"].append({"stage": "async_layers", "detail": "L1/L2/L3 counts did not all become positive within 180 seconds"})
     result["no_decision_cases"] = [case["case_id"] for case in corpus["cases"] if case["status"] in NO_DECISION_STATUSES]
     first_case = corpus["cases"][0]
-    first_read = request_json(f"{base}/v3/conversation/search", {"query": first_case["query"], "limit": 20}, tencent_headers(identity, first_case["separate_query_chat_id"]), timeout=180)
+    first_read = request_json(f"{base}/v3/conversation/search", {"query": first_case["query"], "limit": 20}, tencent_headers(identity), timeout=180)
     result["first_read_after_restart"] = {"http_status": first_read["http_status"], "latency_ms": first_read["elapsed_ms"]}
     result["restart"] = {"elapsed_ms": restart_container("tencent-memorycore")}
     result["restart"]["health"] = wait_for_health(base)
@@ -346,13 +356,14 @@ def run_tencent(corpus, base, result_dir):
         response = request_json(
             f"{base}/v3/conversation/search",
             {"query": case["query"], "limit": 20},
-            tencent_headers(identity, case["separate_query_chat_id"]),
+            tencent_headers(identity),
             timeout=180,
         )
         body = response["body"]
         hits = body.get("data", {}).get("messages", [])
         text = flatten(hits)
         matching_ids = [hit.get("id") for hit in hits if any(message["content"] == hit.get("content") for message in case["messages"])]
+        matching_source_turn_ids = [message["id"] for hit in hits for message in case["messages"] if message["content"] == hit.get("content") and message["role"] == hit.get("role")]
         fact_hits = [fact for fact in case["required_facts"] if fact.casefold() in text.casefold()]
         found = bool(matching_ids) or case["product"].casefold() in text.casefold()
         row = {
@@ -364,6 +375,7 @@ def run_tencent(corpus, base, result_dir):
             "latency_ms": response["elapsed_ms"],
             "source_found": found,
             "citation_message_ids": matching_ids,
+            "citation_source_turn_ids": matching_source_turn_ids,
             "citation_source_chat_id": case["source_chat_id"] if matching_ids else None,
             "required_fact_hits": fact_hits,
             "required_fact_count": len(case["required_facts"]),
@@ -379,6 +391,7 @@ def run_tencent(corpus, base, result_dir):
     result["warm_search_latency"] = stats([row["latency_ms"] for row in searches[1:] if row["http_status"] < 400])
     result["recall_at_20"] = round(sum(row["source_found"] for row in searches) / max(1, len(searches)), 4)
     result["citation_rate"] = round(sum(bool(row["citation_message_ids"]) for row in searches) / max(1, len(searches)), 4)
+    result["raw_source_order_exact_cases"] = sum(row["source_order_exact"] for row in result["raw_queries"])
     result["required_fact_recall"] = round(sum(len(row["required_fact_hits"]) for row in searches) / max(1, sum(row["required_fact_count"] for row in searches)), 4)
     result["no_decision_status_recall"] = round(sum(row["no_decision_status_preserved"] for row in searches if row["expected_status"] in NO_DECISION_STATUSES) / max(1, sum(row["expected_status"] in NO_DECISION_STATUSES for row in searches)), 4)
     known_products = sorted({product.strip() for case in corpus["cases"] for product in case["product"].split(",") if product.strip()}, key=str.casefold)
@@ -400,6 +413,11 @@ def run_tencent(corpus, base, result_dir):
     for layer, data in result["layer_counts_after_restart"].items():
         if data["http_status"] >= 400:
             result["failures"].append({"stage": "restart_layer_count", "layer": layer, "http_status": data["http_status"]})
+    for layer in ("L1_atomic", "L2_scenario", "L3_core"):
+        before = number_of_records(result["layer_counts"], layer)
+        after = number_of_records(result["layer_counts_after_restart"], layer)
+        if before != after:
+            result["failures"].append({"stage": "restart_layer_persistence", "layer": layer, "before": before, "after": after})
     if not successful(result["restart"]["health"]):
         result["failures"].append({"stage": "restart_health", "http_status": result["restart"]["health"]["http_status"]})
     result["raw_case_retrieval"] = [row for row in searches if row["case_id"] in {"case-001-en", "case-002-ru", "case-003-en", "case-004-ru"}]

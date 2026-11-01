@@ -34,23 +34,25 @@ git clone -q --depth 1 --branch v2.0.34 https://github.com/MemTensor/MemOS.git "
 git clone -q --depth 1 --branch v2.0.3 https://github.com/Tencent/TencentDB-Agent-Memory.git "$work/tencent"
 test "$(git -C "$work/memos" rev-parse HEAD)" = 41bf5c7fa89ee08ebedf3c662638b06fc29aca8d
 test "$(git -C "$work/tencent" rev-parse HEAD)" = 084bed45cad6bb7f877455082cee82835d65671a
-python3 - "$work/memos/src/memos/mem_os/utils/default_config.py" <<'PY'
+python3 - "$work/memos/src/memos/mem_os/utils/default_config.py" "$work/memos/src/memos/api/config.py" <<'PY'
 import pathlib
 import sys
 
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
 old = '"tokenizer_or_token_counter": "gpt2"'
-if text.count(old) != 1:
-    raise SystemExit("Pinned MemOS default tokenizer config changed unexpectedly")
-path.write_text(text.replace(old, '"tokenizer_or_token_counter": "character"'))
+expected = (1, 3)
+for filename, count in zip(sys.argv[1:], expected):
+    path = pathlib.Path(filename)
+    text = path.read_text()
+    if text.count(old) != count:
+        raise SystemExit(f"Pinned MemOS tokenizer config changed unexpectedly: {path}")
+    path.write_text(text.replace(old, '"tokenizer_or_token_counter": "character"'))
 PY
 cat > "$artifacts/sources.json" <<'JSON'
 {
   "memos": {"repository": "https://github.com/MemTensor/MemOS", "tag": "v2.0.34", "commit": "41bf5c7fa89ee08ebedf3c662638b06fc29aca8d", "stack": "official self-host REST API + Neo4j + Qdrant"},
   "tencentdb_agent_memory": {"repository": "https://github.com/Tencent/TencentDB-Agent-Memory", "tag": "v2.0.3", "commit": "084bed45cad6bb7f877455082cee82835d65671a", "stack": "official MemoryCore standalone + SQLite + FTS5/BM25"},
   "inference": {"runtime": "local Ollama", "chat_model": "qwen3:0.6b", "embedding_model": "nomic-embed-text", "external_provider": false},
-  "memos_chunker_config_override": {"upstream_default": "gpt2", "selected": "character", "reason": "official Chonkie built-in tokenizer avoids network downloads; overridden only in ephemeral upstream checkout"}
+  "memos_chunker_config_override": {"upstream_default": "gpt2", "selected": "character", "reason": "official Chonkie built-in tokenizer avoids network downloads; overridden in four REST/default config sites only in ephemeral upstream checkout"}
 }
 JSON
 
@@ -198,6 +200,7 @@ server:
 data:
   baseDir: /data/tdai-memory
 llm:
+  enabled: true
   baseUrl: http://ollama:11434/v1
   apiKey: local
   model: qwen3:0.6b
@@ -233,6 +236,11 @@ memory:
   bm25:
     enabled: true
     language: zh
+upstream:
+  supportedAgents:
+    - agent_source: synthetic-agent
+      protocol: openai-chat
+      display_name: Synthetic Benchmark Agent
 YAML
 gateway_api_key="$(openssl rand -hex 32)"
 sed -i '/^server:/a\  apiKey: "${TDAI_GATEWAY_API_KEY}"' "$work/tencent/tdai-gateway.standalone.yaml"
