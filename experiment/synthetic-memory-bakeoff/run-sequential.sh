@@ -275,6 +275,10 @@ memory:
   bm25:
     enabled: true
     language: zh
+worker:
+  concurrency: 1
+  lockTtlMs: 1800000
+  pendingStaleMs: 1860000
 upstream:
   supportedAgents:
     - agent_source: synthetic-agent

@@ -371,7 +371,7 @@ def run_tencent(corpus, base, result_dir):
         result["failures"].append({"stage": "raw_integrity", "exact": result["raw_integrity"]["exact_transcripts_retrieved"], "expected": len(corpus["cases"])})
     layer_start = time.perf_counter()
     layer_history = []
-    while time.perf_counter() - layer_start < 900:
+    while time.perf_counter() - layer_start < 3600:
         current = layer_counts(base, tencent_headers(identity, "lookup-layer-count"))
         layer_history.append({"elapsed_ms": round((time.perf_counter() - layer_start) * 1000, 2), "counts": current})
         for layer, data in current.items():
@@ -383,7 +383,7 @@ def run_tencent(corpus, base, result_dir):
     result["async_layers"] = {"lag_ms": layer_history[-1]["elapsed_ms"] if layer_history else None, "history": layer_history, "completed": bool(layer_history and all(number_of_records(layer_history[-1]["counts"], name) > 0 for name in ("L1_atomic", "L2_scenario", "L3_core")))}
     result["layer_counts"] = layer_history[-1]["counts"] if layer_history else {}
     if not result["async_layers"]["completed"]:
-        result["failures"].append({"stage": "async_layers", "detail": "L1/L2/L3 counts did not all become positive within 900 seconds"})
+        result["failures"].append({"stage": "async_layers", "detail": "L1/L2/L3 counts did not all become positive within 3600 seconds"})
     result["no_decision_cases"] = [case["case_id"] for case in corpus["cases"] if case["status"] in NO_DECISION_STATUSES]
     first_case = corpus["cases"][0]
     result["restart"] = {"elapsed_ms": restart_container("tencent-memorycore")}
