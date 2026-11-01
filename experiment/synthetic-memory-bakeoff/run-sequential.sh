@@ -11,7 +11,7 @@ exec > >(tee "$artifacts/runner.log") 2>&1
 
 cleanup() {
   set +e
-  docker compose -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" down -v --remove-orphans
+  docker compose --env-file "$work/memos/.env" -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" down -v --remove-orphans
   docker rm -f tencent-memorycore >/dev/null 2>&1
   docker rm -f synthetic-ollama >/dev/null 2>&1
   docker network rm "$network" >/dev/null 2>&1
@@ -43,12 +43,12 @@ JSON
 
 docker network create --internal "$network"
 docker pull ollama/ollama:0.40.13
-docker run -d --name synthetic-ollama --cpus 2 --memory 5g -p 127.0.0.1:11434:11434 -v synthetic-ollama:/root/.ollama ollama/ollama:0.40.13
+docker run -d --name synthetic-ollama --cpus 2 --memory 5g -v synthetic-ollama:/root/.ollama ollama/ollama:0.40.13
 for attempt in $(seq 1 60); do
-  if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then break; fi
+  if docker exec synthetic-ollama ollama list >/dev/null 2>&1; then break; fi
   sleep 2
 done
-curl -fsS http://127.0.0.1:11434/api/tags >/dev/null
+docker exec synthetic-ollama ollama list >/dev/null
 docker exec synthetic-ollama ollama pull qwen3:0.6b
 docker exec synthetic-ollama ollama pull nomic-embed-text
 docker network connect --alias ollama "$network" synthetic-ollama
@@ -100,19 +100,17 @@ for line in lines:
     if line.startswith("  ") and not line.startswith("    ") and line.rstrip().endswith(":"):
         service = line.strip()[:-1]
         skip_ports = False
-    if service in {"neo4j", "qdrant"} and line.strip() == "ports:":
+    if service in {"memos", "neo4j", "qdrant"} and line.strip() == "ports:":
         skip_ports = True
         continue
     if skip_ports:
         if line.startswith("      - "):
             continue
         skip_ports = False
-    if service == "memos" and '"8000:8000"' in line:
-        line = line.replace('"8000:8000"', '"127.0.0.1:8000:8000"')
     output.append(line)
 text = "\n".join(output) + "\n"
-if '"127.0.0.1:8000:8000"' not in text or "7474:7474" in text or "6333:6333" in text:
-    raise SystemExit("Compose isolation patch did not pass its port checks")
+if "ports:" in text or "7474:7474" in text or "6333:6333" in text:
+    raise SystemExit("Compose isolation patch did not remove all published service ports")
 path.write_text(text)
 PY
 cat > "$work/memos/experiment-compose.yml" <<'YAML'
@@ -151,19 +149,21 @@ YAML
 
 printf '\nMEMOS_STAGE_BEGIN\n'
 memo_status=0
-if [[ "$memos_build_status" -eq 0 ]] && docker compose -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" up -d; then
+if [[ "$memos_build_status" -eq 0 ]] && docker compose --env-file "$work/memos/.env" -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" up -d; then
   memos_ready=0
-  for attempt in $(seq 1 120); do
-    if curl -fsS http://127.0.0.1:8000/health > "$artifacts/memos-health.json" 2>/dev/null; then memos_ready=1; break; fi
+  memos_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' memos-api-docker)"
+  for attempt in $(seq 1 36); do
+    if curl -fsS "http://$memos_ip:8000/health" > "$artifacts/memos-health.json" 2>/dev/null; then memos_ready=1; break; fi
     sleep 5
   done
   if [[ "$memos_ready" -eq 1 ]]; then
-    MEMOS_URL=http://127.0.0.1:8000 MEMOS_COMPOSE_FILE="$work/memos/docker/docker-compose.yml" MEMOS_COMPOSE_PROJECT="$compose_project" \
+    MEMOS_URL="http://$memos_ip:8000" MEMOS_COMPOSE_FILE="$work/memos/docker/docker-compose.yml" MEMOS_COMPOSE_PROJECT="$compose_project" MEMOS_COMPOSE_ENV_FILE="$work/memos/.env" \
       python3 "$root/experiment/synthetic-memory-bakeoff/benchmark.py" memos "$artifacts/corpus.json" "$artifacts" || memo_status=$?
   else
     memo_status=1
     printf 'MemOS health did not become ready\n' > "$artifacts/memos-failure.txt"
   fi
+  docker logs memos-api-docker > "$artifacts/memos-service.log" 2>&1 || true
 else
   memo_status=1
   printf 'MemOS Compose startup failed or image build unavailable\n' > "$artifacts/memos-failure.txt"
@@ -171,7 +171,7 @@ fi
 printf 'MEMOS_BENCHMARK_EXIT=%s\n' "$memo_status" | tee "$artifacts/memos-exit.txt"
 docker stats --no-stream --format '{{.Name}} {{.CPUPerc}} {{.MemUsage}}' memos-api-docker neo4j-docker qdrant-docker > "$artifacts/memos-resource-snapshot.txt" 2>&1 || true
 docker system df > "$artifacts/memos-docker-disk.txt" 2>&1 || true
-docker compose -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" down -v --remove-orphans
+docker compose --env-file "$work/memos/.env" -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" down -v --remove-orphans
 printf 'MEMOS_STAGE_END\n'
 
 cat > "$work/tencent/tdai-gateway.standalone.yaml" <<'YAML'
@@ -221,14 +221,15 @@ memory:
 YAML
 ten_status=0
 if [[ "$ten_build_status" -eq 0 ]] && docker run -d --name tencent-memorycore --network "$network" --network-alias tencent-memorycore \
-  --cpus 2 --memory 4g -p 127.0.0.1:8420:8420 \
+  --cpus 2 --memory 4g \
   -e TDAI_LLM_API_KEY=local \
   -v "$work/tencent/tdai-gateway.standalone.yaml:/data/config/tdai-gateway.yaml:ro" \
   -v tencent-synthetic-data:/data/tdai-memory \
   synthetic-tencent-memorycore:084bed45; then
   tencent_ready=0
-  for attempt in $(seq 1 120); do
-    if curl -fsS http://127.0.0.1:8420/health > "$artifacts/tencent-health.json" 2>/dev/null; then tencent_ready=1; break; fi
+  tencent_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' tencent-memorycore)"
+  for attempt in $(seq 1 36); do
+    if curl -fsS "http://$tencent_ip:8420/health" > "$artifacts/tencent-health.json" 2>/dev/null; then tencent_ready=1; break; fi
     sleep 5
   done
 else
@@ -237,7 +238,7 @@ else
 fi
 printf '\nTENCENTDB_STAGE_BEGIN\n'
 if [[ "$tencent_ready" -eq 1 ]]; then
-  TENCENTDB_URL=http://127.0.0.1:8420 python3 "$root/experiment/synthetic-memory-bakeoff/benchmark.py" tencentdb "$artifacts/corpus.json" "$artifacts" || ten_status=$?
+  TENCENTDB_URL="http://$tencent_ip:8420" python3 "$root/experiment/synthetic-memory-bakeoff/benchmark.py" tencentdb "$artifacts/corpus.json" "$artifacts" || ten_status=$?
 else
   ten_status=1
   printf 'TencentDB MemoryCore image unavailable, did not start, or did not become healthy\n' > "$artifacts/tencent-failure.txt"
@@ -247,7 +248,7 @@ printf 'TENCENTDB_STAGE_END\n'
 docker stats --no-stream --format '{{.Name}} {{.CPUPerc}} {{.MemUsage}}' tencent-memorycore > "$artifacts/tencent-resource-snapshot.txt" 2>&1 || true
 docker system df > "$artifacts/tencent-docker-disk.txt" 2>&1 || true
 docker logs tencent-memorycore > "$artifacts/tencent-service.log" 2>&1 || true
-docker compose -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" down -v --remove-orphans
+docker compose --env-file "$work/memos/.env" -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" down -v --remove-orphans
 docker rm -f tencent-memorycore synthetic-ollama >/dev/null
 docker network rm "$network"
 trap - EXIT

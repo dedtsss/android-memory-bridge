@@ -146,10 +146,15 @@ def run_memos(corpus, base, result_dir):
     if not successful(result["async_wait"]):
         result["failures"].append({"stage": "async_wait", "http_status": result["async_wait"]["http_status"]})
     compose_file = os.environ.get("MEMOS_COMPOSE_FILE")
+    compose_env_file = os.environ.get("MEMOS_COMPOSE_ENV_FILE")
     compose_project = os.environ.get("MEMOS_COMPOSE_PROJECT", "bakeoff-memos")
     if compose_file:
         started = time.perf_counter()
-        subprocess.run(["docker", "compose", "-p", compose_project, "-f", compose_file, "restart", "memos"], check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        command = ["docker", "compose"]
+        if compose_env_file:
+            command.extend(["--env-file", compose_env_file])
+        command.extend(["-p", compose_project, "-f", compose_file, "restart", "memos"])
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         result["restart"] = {"elapsed_ms": round((time.perf_counter() - started) * 1000, 2)}
         time.sleep(3)
         result["restart"]["health"] = request_json(f"{base}/health", method="GET", timeout=20)
