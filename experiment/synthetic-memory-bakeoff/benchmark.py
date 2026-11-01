@@ -100,6 +100,20 @@ def restart_container(name):
     return round((time.perf_counter() - started) * 1000, 2)
 
 
+def container_url(name, port):
+    completed = subprocess.run(
+        ["docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", name],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    address = completed.stdout.strip()
+    if not address:
+        raise RuntimeError(f"Container {name} has no network address")
+    return f"http://{address}:{port}"
+
+
 def wait_for_health(base, timeout_seconds=90):
     deadline = time.monotonic() + timeout_seconds
     latest = None
@@ -171,6 +185,8 @@ def run_memos(corpus, base, result_dir):
         command.extend(["-p", compose_project, "-f", compose_file, "restart", "memos"])
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         result["restart"] = {"elapsed_ms": round((time.perf_counter() - started) * 1000, 2)}
+        base = container_url("memos-api-docker", 8000)
+        result["restart"]["base_url_refreshed"] = True
         result["restart"]["health"] = wait_for_health(base)
     all_memories = request_json(
         f"{base}/product/get_all",
@@ -290,6 +306,21 @@ def run_tencent(corpus, base, result_dir):
     if result["fts5_available"] is not True:
         raise RuntimeError("TencentDB reports FTS5 unavailable or does not expose a positive FTS5 health signal")
     identity = "synthetic-team/synthetic-agent/synthetic-user"
+    admin = request_json(
+        f"{base}/v3/internal/meta/user/init-admin",
+        {"username": "synthetic-memory-bakeoff-admin"},
+        tencent_headers(identity),
+    )
+    admin_data = admin["body"].get("data", {})
+    admin_key = admin_data.get("user_key") or admin_data.get("default_user_key")
+    if not successful(admin) or not admin_key:
+        raise RuntimeError("TencentDB synthetic metadata admin bootstrap failed")
+    admin_headers = tencent_headers(identity)
+    admin_headers["x-tdai-user-key"] = admin_key
+    seeded_agents = request_json(f"{base}/v3/meta/upstream/supported-agents", {}, admin_headers)
+    result["supported_agents_seed"] = seeded_agents
+    if not successful(seeded_agents) or not any(item.get("agent_source") == "synthetic-agent" for item in seeded_agents["body"].get("data", {}).get("items", [])):
+        raise RuntimeError("TencentDB did not seed the configured synthetic agent")
     for case in corpus["cases"]:
         headers = tencent_headers(identity, case["source_chat_id"])
         messages = [{"role": item["role"], "content": item["content"], "timestamp": item["timestamp"], "recorded_at": item["timestamp"]} for item in case["messages"]]
@@ -346,6 +377,8 @@ def run_tencent(corpus, base, result_dir):
     first_read = request_json(f"{base}/v3/conversation/search", {"query": first_case["query"], "limit": 20}, tencent_headers(identity), timeout=180)
     result["first_read_after_restart"] = {"http_status": first_read["http_status"], "latency_ms": first_read["elapsed_ms"]}
     result["restart"] = {"elapsed_ms": restart_container("tencent-memorycore")}
+    base = container_url("tencent-memorycore", 8420)
+    result["restart"]["base_url_refreshed"] = True
     result["restart"]["health"] = wait_for_health(base)
     if not successful(result["restart"]["health"]):
         result["failures"].append({"stage": "restart_health", "http_status": result["restart"]["health"]["http_status"]})

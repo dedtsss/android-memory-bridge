@@ -167,12 +167,27 @@ YAML
 printf '\nMEMOS_STAGE_BEGIN\n'
 memo_status=0
 if [[ "$memos_build_status" -eq 0 ]] && docker compose --env-file "$work/memos/.env" -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" up -d; then
+  dependencies_ready=0
+  neo4j_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' neo4j-docker)"
+  qdrant_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' qdrant-docker)"
+  for attempt in $(seq 1 60); do
+    neo4j_status="$(curl -sS -o /dev/null -w '%{http_code}' "http://$neo4j_ip:7474/" || true)"
+    qdrant_status="$(curl -sS -o /dev/null -w '%{http_code}' "http://$qdrant_ip:6333/readyz" || true)"
+    if [[ "$neo4j_status" =~ ^(200|401)$ && "$qdrant_status" == "200" ]]; then
+      dependencies_ready=1
+      break
+    fi
+    sleep 5
+  done
+  printf 'neo4j_http_status=%s\nqdrant_readyz_status=%s\n' "$neo4j_status" "$qdrant_status" > "$artifacts/memos-dependency-readiness.txt"
   memos_ready=0
+  if [[ "$dependencies_ready" -eq 1 ]]; then
   memos_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' memos-api-docker)"
   for attempt in $(seq 1 36); do
     if curl -fsS "http://$memos_ip:8000/health" > "$artifacts/memos-health.json" 2>/dev/null; then memos_ready=1; break; fi
     sleep 5
   done
+  fi
   if [[ "$memos_ready" -eq 1 ]]; then
     MEMOS_URL="http://$memos_ip:8000" MEMOS_COMPOSE_FILE="$work/memos/docker/docker-compose.yml" MEMOS_COMPOSE_PROJECT="$compose_project" MEMOS_COMPOSE_ENV_FILE="$work/memos/.env" \
       python3 "$root/experiment/synthetic-memory-bakeoff/benchmark.py" memos "$artifacts/corpus.json" "$artifacts" || memo_status=$?
@@ -220,7 +235,7 @@ memory:
   pipeline:
     everyNConversations: 1
     enableWarmup: true
-  l1IdleTimeoutSeconds: 2
+    l1IdleTimeoutSeconds: 2
     l2DelayAfterL1Seconds: 2
     l2MinIntervalSeconds: 2
     l2MaxIntervalSeconds: 5
