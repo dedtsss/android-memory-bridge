@@ -167,7 +167,7 @@ YAML
 
 printf '\nMEMOS_STAGE_BEGIN\n'
 memo_status=0
-if [[ "$memos_build_status" -eq 0 ]] && docker compose --env-file "$work/memos/.env" -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" up -d; then
+if [[ "$memos_build_status" -eq 0 ]] && docker compose --env-file "$work/memos/.env" -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" up -d neo4j qdrant; then
   dependencies_ready=0
   qdrant_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' qdrant-docker)"
   neo4j_password="$(sed -n 's/^NEO4J_PASSWORD=//p' "$work/memos/.env")"
@@ -184,19 +184,26 @@ if [[ "$memos_build_status" -eq 0 ]] && docker compose --env-file "$work/memos/.
   unset neo4j_password
   printf 'neo4j_bolt=%s\nqdrant_readyz_status=%s\n' "$neo4j_status" "$qdrant_status" > "$artifacts/memos-dependency-readiness.txt"
   memos_ready=0
-  if [[ "$dependencies_ready" -eq 1 ]]; then
-  for attempt in $(seq 1 36); do
-    if curl -fsS "http://127.0.0.1:18000/health" > "$artifacts/memos-health.json" 2>/dev/null; then memos_ready=1; break; fi
-    sleep 5
-  done
+  if [[ "$dependencies_ready" -eq 1 ]] && docker compose --env-file "$work/memos/.env" -p "$compose_project" -f "$work/memos/docker/docker-compose.yml" -f "$work/memos/experiment-compose.yml" up -d memos; then
+    for attempt in $(seq 1 36); do
+      memos_http_status="$(curl -sS --connect-timeout 3 --max-time 5 -o "$artifacts/memos-health.json" -w '%{http_code}' http://127.0.0.1:18000/health 2>/dev/null || true)"
+      if [[ "$memos_http_status" == "200" ]]; then memos_ready=1; break; fi
+      sleep 5
+    done
   fi
+  memos_binding="$(docker port memos-api-docker 8000/tcp 2>/dev/null || true)"
+  printf 'loopback_binding=%s\nhealth_http_status=%s\n' "$memos_binding" "${memos_http_status:-not_started}" > "$artifacts/memos-api-readiness.txt"
   if [[ "$memos_ready" -eq 1 ]]; then
-    [[ "$(docker port memos-api-docker 8000/tcp)" == "127.0.0.1:18000" ]]
-    MEMOS_URL="http://127.0.0.1:18000" MEMOS_COMPOSE_FILE="$work/memos/docker/docker-compose.yml" MEMOS_COMPOSE_PROJECT="$compose_project" MEMOS_COMPOSE_ENV_FILE="$work/memos/.env" \
-      python3 "$root/experiment/synthetic-memory-bakeoff/benchmark.py" memos "$artifacts/corpus.json" "$artifacts" || memo_status=$?
+    if [[ "$memos_binding" == "127.0.0.1:18000" ]]; then
+      MEMOS_URL="http://127.0.0.1:18000" MEMOS_COMPOSE_FILE="$work/memos/docker/docker-compose.yml" MEMOS_COMPOSE_PROJECT="$compose_project" MEMOS_COMPOSE_ENV_FILE="$work/memos/.env" \
+        python3 "$root/experiment/synthetic-memory-bakeoff/benchmark.py" memos "$artifacts/corpus.json" "$artifacts" || memo_status=$?
+    else
+      memo_status=1
+      printf 'MemOS test port was not bound exclusively to runner loopback\n' > "$artifacts/memos-failure.txt"
+    fi
   else
     memo_status=1
-    printf 'MemOS health did not become ready\n' > "$artifacts/memos-failure.txt"
+    printf 'MemOS dependencies/API did not become ready; see bounded readiness artifacts\n' > "$artifacts/memos-failure.txt"
   fi
   docker logs memos-api-docker > "$artifacts/memos-service.log" 2>&1 || true
 else
@@ -278,21 +285,31 @@ if [[ "$ten_build_status" -eq 0 ]] && docker run -d --name tencent-memorycore --
   -v tencent-synthetic-data:/data/tdai-memory \
   synthetic-tencent-memorycore:084bed45; then
   tencent_ready=0
-  for attempt in $(seq 1 36); do
-    if curl -fsS "http://127.0.0.1:18420/health" > "$artifacts/tencent-health.json" 2>/dev/null; then tencent_ready=1; break; fi
-    sleep 5
-  done
+  tencent_http_status="not_probed"
+  tencent_binding="$(docker port tencent-memorycore 8420/tcp 2>/dev/null || true)"
+  if [[ "$tencent_binding" == "127.0.0.1:18420" ]]; then
+    for attempt in $(seq 1 36); do
+      tencent_http_status="$(curl -sS --connect-timeout 3 --max-time 5 -o "$artifacts/tencent-health.json" -w '%{http_code}' http://127.0.0.1:18420/health 2>/dev/null || true)"
+      if [[ "$tencent_http_status" == "200" ]]; then tencent_ready=1; break; fi
+      sleep 5
+    done
+  fi
+  tencent_state="$(docker inspect -f '{{.State.Status}}|{{.State.ExitCode}}|{{.RestartCount}}' tencent-memorycore 2>/dev/null || printf 'missing')"
+  printf 'loopback_binding=%s\nhealth_http_status=%s\ncontainer_state=%s\n' "$tencent_binding" "$tencent_http_status" "$tencent_state" > "$artifacts/tencent-api-readiness.txt"
 else
   tencent_ready=0
-  if [[ "$ten_build_status" -ne 0 ]]; then ten_status=1; fi
+  ten_status=1
+  tencent_http_status="not_started"
+  tencent_binding="unavailable"
+  tencent_state="missing"
+  printf 'loopback_binding=%s\nhealth_http_status=%s\ncontainer_state=%s\n' "$tencent_binding" "$tencent_http_status" "$tencent_state" > "$artifacts/tencent-api-readiness.txt"
 fi
 printf '\nTENCENTDB_STAGE_BEGIN\n'
 if [[ "$tencent_ready" -eq 1 ]]; then
-  [[ "$(docker port tencent-memorycore 8420/tcp)" == "127.0.0.1:18420" ]]
   TENCENTDB_URL="http://127.0.0.1:18420" TENCENTDB_API_KEY="$gateway_api_key" python3 "$root/experiment/synthetic-memory-bakeoff/benchmark.py" tencentdb "$artifacts/corpus.json" "$artifacts" || ten_status=$?
 else
   ten_status=1
-  printf 'TencentDB MemoryCore image unavailable, did not start, or did not become healthy\n' > "$artifacts/tencent-failure.txt"
+  printf 'TencentDB API not ready on verified loopback; see tencent-api-readiness.txt\n' > "$artifacts/tencent-failure.txt"
 fi
 printf 'TENCENTDB_BENCHMARK_EXIT=%s\n' "$ten_status" | tee "$artifacts/tencent-exit.txt"
 printf 'TENCENTDB_STAGE_END\n'
