@@ -157,8 +157,8 @@ object GatewayFactory {
     private val fakeGateway = FakeMemoryGateway()
 
     fun create(settings: GatewaySettings, token: String?): MemoryGateway {
-        if (BuildConfig.DEBUG && settings.gatewayUrl == DEBUG_FAKE_URL) return fakeGateway
         val url = settings.gatewayUrl.trim()
+        if (BuildConfig.DEBUG && url == DEBUG_FAKE_URL) return fakeGateway
         validateUrl(url)
         if (token.isNullOrBlank()) throw GatewayException.Configuration("Missing API token")
         return HttpMemoryGateway(url, token)

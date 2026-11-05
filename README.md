@@ -3,7 +3,7 @@
 Memory Bridge is a small public Android client for an external Memory Gateway. It adds two Android selected-text actions:
 
 - **В память / Save to memory** — sends the exact selected text and an optional note to the Gateway.
-- **Вспомнить / Recall** — requests a ready-to-paste context-pack. In editable fields it returns the result through `ACTION_PROCESS_TEXT`; in read-only sources it offers Copy and Open ChatGPT.
+- **Вспомнить / Recall** — requests a ready-to-paste context-pack. In editable fields it returns the result through `ACTION_PROCESS_TEXT`; in read-only sources it offers Copy or Copy and return.
 
 It also receives `text/plain` through the Android Sharesheet. This repository is independent of Android Dispatcher and contains no memory backend.
 

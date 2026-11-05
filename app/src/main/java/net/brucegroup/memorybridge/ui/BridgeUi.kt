@@ -3,8 +3,6 @@ package net.brucegroup.memorybridge.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -25,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import net.brucegroup.memorybridge.BuildConfig
 import net.brucegroup.memorybridge.R
 import net.brucegroup.memorybridge.domain.GatewayException
 
@@ -68,19 +67,20 @@ fun copyToClipboard(context: Context, value: String) {
     clipboard.setPrimaryClip(ClipData.newPlainText("Memory Bridge context", value))
 }
 
-fun openChatGpt(context: Context) {
-    val chatGpt = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setPackage("com.openai.chatgpt")
-    val fallback = Intent(Intent.ACTION_VIEW, Uri.parse("https://chatgpt.com"))
-    try {
-        context.startActivity(chatGpt)
-    } catch (_: Exception) {
-        context.startActivity(fallback)
-    }
+fun copyAndFinish(context: Context, value: String, finish: () -> Unit) {
+    copyToClipboard(context, value)
+    finish()
 }
 
 fun gatewayMessage(context: Context, error: Throwable): String {
     val message = when (error) {
-        is GatewayException.Configuration -> context.getString(R.string.error_configuration)
+        is GatewayException.Configuration -> when {
+            BuildConfig.DEBUG && error.message == "Invalid Gateway URL" ->
+                context.getString(R.string.error_invalid_gateway_url)
+            BuildConfig.DEBUG && error.message == "Missing API token" ->
+                context.getString(R.string.error_missing_api_token)
+            else -> context.getString(R.string.error_configuration)
+        }
         is GatewayException.Offline -> context.getString(R.string.error_offline)
         is GatewayException.Timeout -> context.getString(R.string.error_timeout)
         is GatewayException.ResponseTooLarge -> context.getString(R.string.error_response_too_large)

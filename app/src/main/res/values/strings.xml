@@ -23,7 +23,7 @@
     <string name="saved_to_memory">Saved to memory</string>
     <string name="undo">Undo</string>
     <string name="copy">Copy</string>
-    <string name="copy_and_open_chatgpt">Copy and open ChatGPT</string>
+    <string name="copy_and_return">Copy and return</string>
     <string name="shared_text">Shared text</string>
     <string name="share_url_notice">Only a URL was received. The conversation text was not downloaded.</string>
     <string name="recall_optional">Recall instead</string>
@@ -31,6 +31,8 @@
     <string name="text_too_long">The text exceeds the safe limit (%1$d characters).</string>
     <string name="request_failed">Could not complete the request.</string>
     <string name="error_configuration">Check the Gateway URL and API token.</string>
+    <string name="error_invalid_gateway_url">Invalid Gateway URL.</string>
+    <string name="error_missing_api_token">Missing API token.</string>
     <string name="error_offline">No network connection. Try again when online.</string>
     <string name="error_timeout">The Gateway did not respond in time.</string>
     <string name="error_response_too_large">The context-pack is too large to use safely.</string>

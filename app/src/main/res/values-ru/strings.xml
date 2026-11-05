@@ -23,7 +23,7 @@
     <string name="saved_to_memory">Сохранено в память</string>
     <string name="undo">Отменить</string>
     <string name="copy">Копировать</string>
-    <string name="copy_and_open_chatgpt">Копировать и открыть ChatGPT</string>
+    <string name="copy_and_return">Скопировать и вернуться</string>
     <string name="shared_text">Полученный текст</string>
     <string name="share_url_notice">Получен только URL. Полный текст диалога не загружался.</string>
     <string name="recall_optional">Вспомнить вместо этого</string>
@@ -31,6 +31,8 @@
     <string name="text_too_long">Текст превышает безопасный лимит (%1$d символов).</string>
     <string name="request_failed">Не удалось выполнить запрос.</string>
     <string name="error_configuration">Проверьте URL Gateway и API-токен.</string>
+    <string name="error_invalid_gateway_url">Некорректный URL Gateway.</string>
+    <string name="error_missing_api_token">Отсутствует API-токен.</string>
     <string name="error_offline">Нет сети. Повторите попытку, когда соединение появится.</string>
     <string name="error_timeout">Gateway не ответил вовремя.</string>
     <string name="error_response_too_large">Context-pack слишком большой для безопасной обработки.</string>
